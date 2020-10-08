@@ -1,0 +1,218 @@
+model EPower
+
+uses "mmxprs"
+
+declarations
+  Emiss: set of string
+  Source: set of string
+  Times: set of integer
+  PeriodLength: array(Times) of integer
+  Demand: array(Times) of real
+  MaxOutput: array(Source) of real
+  RunningCost: array(Source) of real
+  IncreaseCost: array(Source) of real
+  Emissions: array(Emiss, Source) of real
+  EmissionsLimit: array(Emiss) of real
+  ElectricityPrice: real
+  PowerOutput: array(Source, Times) of mpvar
+  IncreasedInPower: array(Source, Times) of mpvar
+
+  MaxHydroReserve: real 
+  NaturalHydroInflow: real 
+  HydroPowerEfficiencyFrac: real
+  AverageWindMaxOutput: real
+  DailyHydroCost: real
+  PowerDemand: array(Times) of mpvar 
+  EnergyInput: array(Times) of mpvar
+  EnergyOutput: array(Times) of mpvar
+  Temporary: array(Times) of mpvar
+  Stock: array(Times) of mpvar
+end-declarations
+
+initialisations from "EPower.dat"
+  Emiss Source
+  Times PeriodLength Demand
+  MaxOutput RunningCost IncreaseCost
+  Emissions EmissionsLimit ElectricityPrice
+  MaxHydroReserve NaturalHydroInflow HydroPowerEfficiencyFrac AverageWindMaxOutput
+end-initialisations
+
+!Stage 1 power system: switch off the pump storage hydro-power scheme
+!MaxOutput("Hydro") := 0
+!NaturalHydroInflow := 0
+
+!switch off the nuclear plant
+!MaxOutput("Nuclear") := 0
+
+!Adjust the wind output in [0,22000] MW
+MaxOutput("Wind") := AverageWindMaxOutput
+
+!MaxOutput Constraint
+co := 1.0 ! the coefficient of maximum efficiency
+forall(s in Source, t in Times) do
+  OutputCS(s, t) := PowerOutput(s, t) <= MaxOutput(s)*co
+  Energy(s, t) := PowerOutput(s, t)*PeriodLength(t)
+end-do
+
+!Demand Constraint 
+!Add the power demand for pumping water into the total demand
+forall(t in Times) do
+  PowerGenerated(t) := sum(s in Source)  PowerOutput(s, t)
+  Temporary(t) = Demand(t) + PowerDemand(t)
+  DemandCS(t) := PowerGenerated(t) = Temporary(t)
+!Data for Green Scheme
+!  GreenCS(t) := PowerOutput("Nuclear", t) = 5000
+!  if t = 4 then 
+!    GreenCS1(t) := PowerOutput("Coal", t) = 1600
+!  else
+!    GreenCS1(t) := PowerOutput("Coal", t) = 0
+!  end-if
+end-do
+
+!Inventory Constraint: water stored in the reservoir should not exceed the Max Reserve 
+forall(t in Times) do
+  EnergyInputCS(t) := EnergyInput(t) = PeriodLength(t)*(NaturalHydroInflow + PowerDemand(t)*HydroPowerEfficiencyFrac)
+  EnergyOutputCS(t) := EnergyOutput(t) = PeriodLength(t)*PowerOutput("Hydro", t)
+  if t = 1 then
+      InventoryCS(t) := Stock(t) = Stock(6) + EnergyInput(t) - EnergyOutput(t)
+  else
+      InventoryCS(t) := Stock(t) = Stock(t-1) + EnergyInput(t) - EnergyOutput(t)
+  end-if
+  MaxHydroReserveCS(t) := Stock(t) <= MaxHydroReserve
+end-do
+
+!Emission Constraint
+forall(s in Source) SourceProduction(s) :=  sum(t in Times) Energy(s, t)
+forall(e in Emiss) do
+  TotalEmission(e) := sum(s in Source) Emissions(e, s)*SourceProduction(s)
+  EmissionCS(e) := TotalEmission(e) <= EmissionsLimit(e)
+end-do
+
+!Get the Increase Cost
+forall(t in Times, s in Source) do
+  if t = 1 then
+    ChangeInPower(s ,t) := PowerOutput(s, t)  - PowerOutput(s, 6)
+  else
+    ChangeInPower(s ,t) := PowerOutput(s, t) - PowerOutput(s, t-1)
+  end-if
+
+IncreasedInPowerCS(s, t) := IncreasedInPower(s, t) >= 0
+IncreasedInPowerCS(s, t) := IncreasedInPower(s, t) >= ChangeInPower(s ,t)
+end-do
+
+if MaxOutput("Hydro") = 0 then 
+  DailyHydroCost := 0 
+else
+  DailyHydroCost := 1000000
+end-if
+TotalOutput := sum(s in Source, t in Times) PowerOutput(s, t)
+TotalIncreaseCost := sum(s in Source, t in Times) IncreasedInPower(s, t) *IncreaseCost(s)
+TotalRunningCost := sum(s in Source, t in Times) PeriodLength(t)*RunningCost(s)*PowerOutput(s, t)
+TotalCost := TotalRunningCost + TotalIncreaseCost + DailyHydroCost
+TotalIncome := sum(t in Times) PeriodLength(t)*Demand(t)*ElectricityPrice
+Profit := TotalIncome - TotalCost
+
+maximise(Profit)
+
+! Solution printing
+forall(t in Times) writeln("Hydro System Power Demand in Period ", t, " is " ,getsol(PowerDemand(t)))
+writeln("Total Output: ", getsol(TotalOutput), " MW")
+writeln("Total Income: ", "£", getsol(TotalIncome))
+writeln("Total Increase Cost: ", "£",getsol(TotalIncreaseCost))
+writeln("Total Cost: ", "£", getsol(TotalCost))
+writeln("Profit: ",  "£", getsol(Profit))
+
+forall(s in Source, t in Times) 
+  writeln("Source ", s, " in time period ", t, " generates ", getsol(PowerOutput(s,t)), " MW")
+
+writeln
+forall(s in Source, t in Times) do
+  Slack := getslack(OutputCS(s, t))
+  write("For ", strfmt(s, -15), "in period ", t)
+  write(" the slack is ", strfmt(Slack, 7))
+  if (Slack = 0) then
+    Dual := getdual(OutputCS(s, t))
+    writeln(" and marginal price is ", strfmt(Dual, 4))
+  else
+    writeln(" so no marginal price")
+  end-if
+end-do
+
+writeln
+forall(e in Emiss) do
+  Slack := getslack(EmissionCS(e))
+  write("For ", strfmt(e, -15), ":")
+  write(" the slack is ", strfmt(Slack, 7))
+  if (Slack = 0) then
+    Dual := getdual(EmissionCS(e))
+    writeln(" and marginal price is ", strfmt(Dual, 4))
+    DnRange := getsensrng(XPRS_DN, EmissionCS(e))
+    UpRange := getsensrng(XPRS_UP, EmissionCS(e))
+    writeln("                     the amount used is ", strfmt(getsol(TotalEmission(e)), 6), " with range [", strfmt(DnRange, 4,0), ", ", strfmt(UpRange, 4,0), "]")
+  else
+    writeln(" so no marginal price")
+  end-if
+end-do
+
+!Report results to a .csv file for further processing in Excel
+fopen("1hydro1nuclear.csv", F_OUTPUT)
+  write("Source")
+  forall(t in Times) write(",", t)
+  writeln
+    forall(s in Source) do
+      write(s)
+      forall(t in Times)  write(",", strfmt(getsol(PowerOutput(s,t)), 3))
+      writeln
+    end-do
+    
+  writeln("The Average Maximum Wind Output is ", MaxOutput("Wind"), " MW")
+  writeln("Total Output: ", getsol(TotalOutput), " MW")
+  writeln("Total Income: ", "£", getsol(TotalIncome))
+  writeln("Total Increase Cost: ", "£",getsol(TotalIncreaseCost))
+  writeln("Total Cost: ", "£", getsol(TotalCost))
+  writeln("Totoal Profit: ",  "£", getsol(Profit))
+  
+  writeln
+  write("Source") 
+  forall(t in Times) write(",", t)
+  writeln
+  forall(s in Source) do
+    write(s)
+    forall(t in Times)  do
+      Slack := getslack(OutputCS(s, t))
+      if (Slack = 0) then
+        Dual := getdual(OutputCS(s, t))
+        write(",",strfmt(Dual, 4))
+      else
+        write(",","Not up to the constraint")
+      end-if
+    end-do
+    writeln
+  end-do
+  
+writeln
+forall(e in Emiss) do
+  writeln(e)
+  Slack := getslack(EmissionCS(e))
+  write("slack")
+  write(",", strfmt(Slack, 7))
+  writeln
+  if (Slack = 0) then
+    Dual := getdual(EmissionCS(e))
+    write("marginal price ")
+    write(",", strfmt(Dual, 4))
+    DnRange := getsensrng(XPRS_DN, EmissionCS(e))
+    UpRange := getsensrng(XPRS_UP, EmissionCS(e))
+    writeln
+    write("Polluted")
+    write(",", strfmt(getsol(TotalEmission(e)), 6))
+    writeln
+    write("[",strfmt(DnRange, 4,0)," \, ",strfmt(UpRange, 4,0), "]")
+  else
+    writeln(" so no marginal price")
+  end-if
+  writeln
+end-do
+
+fclose(F_OUTPUT)
+end-model

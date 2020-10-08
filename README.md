@@ -1,2 +1,2 @@
 # EPower
-Linear Programming Case Study
+Individual Case Study of Linear Programming, Modelling and Solution at University of Edinburgh.
